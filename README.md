@@ -230,11 +230,17 @@ stops at `pb`). The precise scope of the "matches `bytes`" claim:
 - For a fractional input on one of `bytes`' five real units (`kb`, `mb`,
   `gb`, `tb`, `pb` — the only ones its regex actually matches; see below),
   add `{ rounding: 'floor' }` to reproduce its `Math.floor(unitSize * value)`
-  truncation exactly. This is verified by a differential test
-  (`test/differential-bytes.test.ts`) against the real, installed package
-  over a sweep of unit × value combinations, below 2⁵³; above 2⁵³, `bytes`'
-  plain-float arithmetic silently loses precision and this package's exact
-  bigint arithmetic does not — the same test documents and asserts that
+  truncation — with two measured exceptions, both because `bytes` computes
+  that product in a plain `Number`, not exact bigint math. **Below 2⁵³**, a
+  decimal literal that has no exact binary floating-point representation can
+  make the float product round up before flooring, off by ±1: measured,
+  `bytes.parse('2606.710tb')` returns `2866107955239977`, one more than the
+  exact floor (`2866107955239976`) — the true value (~2.87×10¹⁵) is nowhere
+  near 2⁵³ (~9.007×10¹⁵). **Above 2⁵³**, the product can no longer be
+  represented as an integer at all (e.g. `1024pb`, tested below). Both are
+  asserted by a differential test (`test/differential-bytes.test.ts`)
+  against the real, installed package, over a sweep of unit × value
+  combinations plus two pinned cases — it documents and asserts the
   divergence rather than papering over it.
 - `bytes@3.1.2`'s parser only matches `kb`/`mb`/`gb`/`tb`/`pb` by regex, with
   no bare `b`/`B` suffix, nothing past `pb`, and no exponent notation. Any

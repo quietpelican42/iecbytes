@@ -23,6 +23,13 @@
  * restricts its "real unit arithmetic" comparison to the five units that
  * actually take the `Math.floor(unitSize * parseFloat(str))` path:
  * `kb`, `mb`, `gb`, `tb`, `pb`.
+ *
+ * Two distinct ways that float path diverges from this package's exact
+ * bigint math, both measured here: (1) well below 2^53, whenever the
+ * decimal literal has no exact binary floating-point representation and the
+ * product happens to round up before flooring — e.g. `2606.710tb`, off by
+ * +1, pinned below; and (2) above 2^53, where the product itself can no
+ * longer be represented as an integer at all — e.g. `1024pb`.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -120,6 +127,29 @@ test('differential: parse(..., {mode:"jedec", rounding:"floor"}) matches bytes@3
     checked++;
   }
   assert.ok(checked > 150, `expected a real sweep, only checked ${checked}`);
+});
+
+test('differential: bytes@3.1.2 can be off by one well below 2^53 (float rounding, not just overflow)', (t) => {
+  if (!available) {
+    t.skip(`bytes@3.1.2 not resolvable from IECBYTES_BYTES_CWD=${JSON.stringify(BYTES_CWD)}`);
+    return;
+  }
+  // 2606.710tb: 2606710/1000 * 1024^4. The true product, ~2.87e15, is well
+  // under 2^53 (~9.007e15) — but 2606.710 has no exact binary floating-point
+  // representation, so `Math.floor(1024**4 * 2606.710)` in real bytes@3.1.2
+  // rounds the product UP by 1 before flooring. The true floor is
+  // recomputed here independently (plain bigint arithmetic, not by calling
+  // into this package) as the ground truth both sides are checked against.
+  const input = '2606.710tb';
+  const trueFloor = (2606710n * 1024n ** 4n) / 1000n;
+  assert.equal(trueFloor, 2866107955239976n); // pinned, so a refactor can't silently change the ground truth
+
+  const ours = parse(input, { mode: 'jedec', rounding: 'floor' });
+  assert.equal(ours, trueFloor, 'this package must match independently-computed exact bigint math');
+
+  const [bytesResult] = parseViaBytes([input]);
+  assert.equal(bytesResult, '2866107955239977', 'pinned: bytes@3.1.2 measured as off by +1 here');
+  assert.notEqual(BigInt(bytesResult!), trueFloor, 'bytes@3.1.2 is off by one on this input, well below 2^53');
 });
 
 test('differential: above 2^53, bytes@3.1.2 loses precision (float) and this package does not (bigint)', (t) => {
