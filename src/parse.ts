@@ -41,15 +41,21 @@ export interface ParseOptions {
    * don't add up to a byte, or a decimal fraction of a non-power-of-10 unit
    * that doesn't land on an integer — `"5.9 KiB"` is genuinely 6041.6 bytes).
    *
-   * `nearest`: round half-up to the nearest whole byte instead. Use this
-   * when recovering a value from text `format()` itself produced, since
-   * decimal rounding of a base-1024 (or base-1000-but-fractional) value is
-   * not guaranteed to land back on an integer.
+   * `nearest`: round half-up (ties away from zero) to the nearest whole byte
+   * instead. Use this when recovering a value from text `format()` itself
+   * produced, since decimal rounding of a base-1024 (or
+   * base-1000-but-fractional) value is not guaranteed to land back on an
+   * integer.
+   *
+   * `floor`: round toward negative infinity, matching exactly what
+   * `bytes@3.1.2`'s `Math.floor(unitSize * parseFloat(str))` does. Use this
+   * for byte-for-byte parity with `bytes` in `{ mode: 'jedec' }` (see
+   * README "Interop").
    */
-  rounding?: 'exact' | 'nearest';
+  rounding?: 'exact' | 'nearest' | 'floor';
 }
 
-/** Half-up rounding of an exact `numerator / denominator` to the nearest integer, sign-preserving. */
+/** Half-up rounding (ties away from zero) of an exact `numerator / denominator`, sign-preserving. */
 function roundHalfUp(numerator: bigint, denominator: bigint): bigint {
   const negative = numerator < 0n;
   const abs = negative ? -numerator : numerator;
@@ -57,6 +63,26 @@ function roundHalfUp(numerator: bigint, denominator: bigint): bigint {
   const remainder = abs % denominator;
   const rounded = remainder * 2n >= denominator ? quotient + 1n : quotient;
   return negative ? -rounded : rounded;
+}
+
+/** Floor (round toward -Infinity) of an exact `numerator / denominator`; `denominator` must be > 0. */
+function roundFloor(numerator: bigint, denominator: bigint): bigint {
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return remainder !== 0n && numerator < 0n ? quotient - 1n : quotient;
+}
+
+/** Round a `numerator/denominator` fraction per `rounding`, or invoke `onExact`/throw via `onInexact`. */
+function resolveFraction(
+  numerator: bigint,
+  denominator: bigint,
+  rounding: 'exact' | 'nearest' | 'floor',
+  onInexact: () => never,
+): bigint {
+  if (numerator % denominator === 0n) return numerator / denominator;
+  if (rounding === 'nearest') return roundHalfUp(numerator, denominator);
+  if (rounding === 'floor') return roundFloor(numerator, denominator);
+  onInexact();
 }
 
 const NUMBER_AND_UNIT = /^\s*([+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?)\s*([A-Za-z]*)\s*$/;
@@ -131,8 +157,23 @@ function resolveAutoUnit(input: string, unitText: string): UnitInfo {
   return { base: iMarker ? IEC_BASE : SI_BASE, exponent, bits: false };
 }
 
-/** Parse to an exact integer number of *bits* (always whole; see FractionalBitError). */
-export function parseCoreBits(input: string, options: ParseOptions = {}): bigint {
+interface Resolved {
+  /** The decimal literal times the unit's `base^exponent`, as an exact fraction. */
+  numerator: bigint;
+  denominator: bigint;
+  unit: UnitInfo;
+}
+
+/**
+ * Parse the number and unit, and compute the exact value in the *unit's own
+ * currency*: bits if the unit is bit-denominated (`b`, `kb`, `Mib`, ...),
+ * bytes if it is byte-denominated (`B`, `kB`, `KiB`, ...). Keeping the two
+ * currencies apart (rather than always converting to bits) is what lets the
+ * error thrown for an inexact result name the right unit family: a
+ * fractional `EB` value is a `FractionalByteError`, not a bit-currency error
+ * that happens to be about bytes.
+ */
+function resolve(input: string, options: ParseOptions): Resolved {
   const mode = options.mode ?? 'strict';
   const m = NUMBER_AND_UNIT.exec(input);
   if (!m) {
@@ -151,30 +192,43 @@ export function parseCoreBits(input: string, options: ParseOptions = {}): bigint
     unit = resolveAutoUnit(input, unitText!);
   }
 
-  const { numerator, denominator } = literalToFraction(numberText!);
-  const multiplier = unit.base ** BigInt(unit.exponent) * (unit.bits ? 1n : 8n);
-  const totalNumerator = numerator * multiplier;
+  const { numerator: litNumerator, denominator } = literalToFraction(numberText!);
+  const numerator = litNumerator * unit.base ** BigInt(unit.exponent);
+  return { numerator, denominator, unit };
+}
 
-  if (totalNumerator % denominator !== 0n) {
-    if (options.rounding === 'nearest') return roundHalfUp(totalNumerator, denominator);
-    throw new FractionalBitError(input, totalNumerator, denominator);
+/** Parse a human byte/bit size to an exact bigint number of bits. */
+export function parseBits(input: string, options: ParseOptions = {}): bigint {
+  const { numerator, denominator, unit } = resolve(input, options);
+  const rounding = options.rounding ?? 'exact';
+
+  if (unit.bits) {
+    return resolveFraction(numerator, denominator, rounding, () => {
+      throw new FractionalBitError(input, numerator, denominator);
+    });
   }
-  return totalNumerator / denominator;
+  const bytes = resolveFraction(numerator, denominator, rounding, () => {
+    throw new FractionalByteError(input, numerator, denominator);
+  });
+  return bytes * 8n;
 }
 
 /** Parse a human byte size to an exact bigint number of bytes. */
 export function parse(input: string, options: ParseOptions = {}): bigint {
-  const bits = parseCoreBits(input, options);
-  if (bits % 8n !== 0n) {
-    if (options.rounding === 'nearest') return roundHalfUp(bits, 8n);
-    throw new FractionalByteError(input, bits);
-  }
-  return bits / 8n;
-}
+  const { numerator, denominator, unit } = resolve(input, options);
+  const rounding = options.rounding ?? 'exact';
 
-/** Parse a human byte/bit size to an exact bigint number of bits (never throws for a fractional byte). */
-export function parseBits(input: string, options: ParseOptions = {}): bigint {
-  return parseCoreBits(input, options);
+  if (!unit.bits) {
+    return resolveFraction(numerator, denominator, rounding, () => {
+      throw new FractionalByteError(input, numerator, denominator);
+    });
+  }
+  const bits = resolveFraction(numerator, denominator, rounding, () => {
+    throw new FractionalBitError(input, numerator, denominator);
+  });
+  return resolveFraction(bits, 8n, rounding, () => {
+    throw new FractionalByteError(input, bits, 8n);
+  });
 }
 
 export interface AsNumberOptions {

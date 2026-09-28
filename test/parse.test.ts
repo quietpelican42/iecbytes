@@ -119,11 +119,36 @@ test('asNumber: exactness guard at 2^53', () => {
 
 test('rounding: "nearest" recovers a value from decimal text that is not exactly whole bytes', () => {
   // 5.9 KiB is exactly 6041.6 bytes: not representable as an exact bigint.
-  assert.throws(() => parse('5.9KiB'), FractionalBitError);
+  // KiB is a byte-denominated unit, so the mismatch is reported as
+  // FractionalByteError, not FractionalBitError (that's for bit units).
+  assert.throws(() => parse('5.9KiB'), FractionalByteError);
   assert.equal(parse('5.9KiB', { rounding: 'nearest' }), 6042n); // 6041.6 rounds up
   assert.equal(parse('1b', { rounding: 'nearest' }), 0n); // 1 bit rounds down to 0 bytes
   assert.equal(parse('5b', { rounding: 'nearest' }), 1n); // 5 bits rounds up to 1 byte
   assert.equal(parse('-5.9KiB', { rounding: 'nearest' }), -6042n);
+});
+
+test('error class matches the unit family, not an internal implementation detail', () => {
+  // Byte-denominated units (KiB, EB, ...) that don't land on a whole byte
+  // report FractionalByteError, even though bytes-iec's own JEDEC parity
+  // math never touches a bit at all.
+  assert.throws(() => parse('1.1EB', { mode: 'jedec' }), FractionalByteError);
+  assert.throws(() => parse('5.9KiB'), FractionalByteError);
+  // Bit-denominated units (b, kb, Mib, ...) that don't land on a whole bit
+  // report FractionalBitError; landing on a whole bit that isn't a whole
+  // byte is still FractionalByteError (it's a byte-exactness problem).
+  assert.throws(() => parse('1.5b'), FractionalBitError);
+  assert.throws(() => parse('1b'), FractionalByteError);
+});
+
+test('rounding: "floor" rounds toward -Infinity, like Math.floor', () => {
+  // Matches real bytes@3.1.2 arithmetic exactly for its 5 regex-matched
+  // units (kb/mb/gb/tb/pb) — see test/differential-bytes.test.ts for the
+  // differential proof against the actual package.
+  assert.equal(parse('3.14159kb', { mode: 'jedec', rounding: 'floor' }), 3216n);
+  assert.equal(parse('-3.14159kb', { mode: 'jedec', rounding: 'floor' }), -3217n); // floors toward -Infinity
+  assert.equal(parse('5.9KiB', { rounding: 'floor' }), 6041n);
+  assert.equal(parse('-5.9KiB', { rounding: 'floor' }), -6042n);
 });
 
 test('zero and large scales round-trip through bigint exactly', () => {

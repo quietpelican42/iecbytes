@@ -46,27 +46,58 @@ export class UnknownUnitError extends ByteSizeError {
   }
 }
 
+function gcd(a: bigint, b: bigint): bigint {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b !== 0n) {
+    [a, b] = [b, a % b];
+  }
+  return a;
+}
+
+/** Reduce numerator/denominator to lowest terms for a readable error message (denominator > 0). */
+function reducedFraction(numerator: bigint, denominator: bigint): string {
+  if (numerator === 0n) return '0';
+  const g = gcd(numerator, denominator);
+  const n = numerator / g;
+  const d = denominator / g;
+  return d === 1n ? `${n}` : `${n}/${d}`;
+}
+
 /**
- * A bit-denominated size (`b`, `kb`, `Mib`, ...) did not land on a whole
- * number of bytes, so it cannot be returned as an exact byte bigint.
+ * The exact value is not a whole number of *bytes*. Two distinct situations
+ * produce this: a byte-denominated unit whose decimal literal doesn't divide
+ * evenly (`"1.1EB"` is exactly `1100000000000000000` — fine — but e.g.
+ * `"1.1KiB"` is not an integer), or a bit-denominated size that is a whole
+ * number of bits but not a multiple of 8 (`"1b"` is 1 bit, not 1/8 of a byte).
+ * `numerator`/`denominator` is the exact byte count as a fraction.
  */
 export class FractionalByteError extends ByteSizeError {
-  bits: bigint;
-  constructor(input: string, bits: bigint) {
+  numerator: bigint;
+  denominator: bigint;
+  constructor(input: string, numerator: bigint, denominator: bigint) {
     super(
-      `${JSON.stringify(input)} is ${bits} bit(s), not a whole number of bytes; ` +
-        `use parseBits() to get the exact bit count`,
+      `${JSON.stringify(input)} is ${reducedFraction(numerator, denominator)} byte(s), not a whole number of bytes; ` +
+        `use parseBits() for the exact bit count, or { rounding: 'nearest' | 'floor' } to round`,
     );
     this.name = 'FractionalByteError';
-    this.bits = bits;
+    this.numerator = numerator;
+    this.denominator = denominator;
   }
 }
 
-/** The decimal literal itself, combined with the unit, is not a whole number of bits. */
+/** The decimal literal itself, combined with a *bit*-denominated unit, is not a whole number of bits. */
 export class FractionalBitError extends ByteSizeError {
+  numerator: bigint;
+  denominator: bigint;
   constructor(input: string, numerator: bigint, denominator: bigint) {
-    super(`${JSON.stringify(input)} is ${numerator}/${denominator} bit(s), not a whole number of bits`);
+    super(
+      `${JSON.stringify(input)} is ${reducedFraction(numerator, denominator)} bit(s), not a whole number of bits; ` +
+        `{ rounding: 'nearest' | 'floor' } will round`,
+    );
     this.name = 'FractionalBitError';
+    this.numerator = numerator;
+    this.denominator = denominator;
   }
 }
 

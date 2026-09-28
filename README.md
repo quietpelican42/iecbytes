@@ -104,8 +104,16 @@ picking one.
 ```ts
 import { parse } from 'iecbytes';
 
-parse('10KB', { mode: 'jedec' }); // 10240n — same reading as bytes@3.1.2 and Windows Explorer
+parse('10KB', { mode: 'jedec' });                              // 10240n — same reading as bytes@3.1.2
+parse('3.14159kb', { mode: 'jedec', rounding: 'floor' });       // 3216n  — bytes@3.1.2 gives exactly this too
 ```
+
+`{ mode: 'jedec' }` alone matches `bytes@3.1.2`'s unit table (1024-based,
+case-insensitive) for every input whose true value is already a whole byte.
+For a fractional input, `bytes` computes `Math.floor(unitSize * value)` in
+floating point — add `{ rounding: 'floor' }` to reproduce that truncation
+exactly, in bigint arithmetic, for its five real units (`kb`/`mb`/`gb`/`tb`/`pb`).
+See "Interop" below for the precise scope of that claim.
 
 ### Lenient parsing of unpredictable input
 
@@ -157,7 +165,7 @@ a whole number of bytes.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `mode` | `'strict' \| 'jedec' \| 'auto'` | `'strict'` | Which unit grammar to accept. |
-| `rounding` | `'exact' \| 'nearest'` | `'exact'` | `'nearest'` rounds half-up to a whole byte instead of throwing. |
+| `rounding` | `'exact' \| 'nearest' \| 'floor'` | `'exact'` | `'nearest'` rounds half-up to a whole byte instead of throwing; `'floor'` rounds toward -Infinity, matching `bytes@3.1.2`'s `Math.floor(unitSize * value)` (see "Interop"). |
 
 ### `parseBits(input: string, options?): bigint`
 
@@ -198,8 +206,8 @@ All extend `ByteSizeError`.
 - `MalformedInputError` — the text is not a number optionally followed by a unit.
 - `UnknownUnitError` — the unit text isn't recognized in the given mode.
 - `AmbiguousUnitError` — the unit is a real spelling under a *different* mode (e.g. `KB` in `strict`); names the likely intents.
-- `FractionalBitError` — the decimal literal times the unit isn't a whole number of bits.
-- `FractionalByteError` — it's a whole number of bits, but not a multiple of 8.
+- `FractionalBitError` — a bit-denominated unit (`b`, `kb`, `Mib`, ...) times the decimal literal isn't a whole number of bits.
+- `FractionalByteError` — a byte-denominated unit (`B`, `kB`, `KiB`, ...) times the decimal literal isn't a whole number of bytes, *or* a bit-denominated size is a whole number of bits but not a multiple of 8. The error class always names the unit family that was actually ambiguous — a fractional `EB` never reports as a bit error just because bytes are internally 8 bits.
 - `UnsafeIntegerError` — `asNumber()` would lose precision.
 
 ### Interop: what other tools accept
@@ -213,17 +221,45 @@ All extend `ByteSizeError`.
 | `humanfriendly.parse_size` (measured here, Python, v10.0) | 1000 | 1024 | case-insensitive; matches this package's `auto` mode almost exactly, except it has no bit units and no ronna/quetta |
 | systemd (per `systemd.syntax`/`-P`-style docs, not independently verified — no Linux available in this environment) | `K`=1024 (systemd's `K` is already binary; it has no separate decimal reading) | same as `K` | systemd unit files use `K`/`M`/`G`/`T` for 1024-based sizes; there is no `Ki` spelling |
 
-This package's `jedec` mode matches the `bytes` row exactly (case-insensitive,
-1024-based, extended here through `QB` — `bytes` itself stops at `pb`).
+This package's `jedec` mode matches the `bytes` row's unit table exactly
+(case-insensitive, 1024-based, extended here through `QB` — `bytes` itself
+stops at `pb`). The precise scope of the "matches `bytes`" claim:
+
+- For any input whose true value is already a whole number of bytes,
+  `{ mode: 'jedec' }` alone matches `bytes@3.1.2` — no rounding mode needed.
+- For a fractional input on one of `bytes`' five real units (`kb`, `mb`,
+  `gb`, `tb`, `pb` — the only ones its regex actually matches; see below),
+  add `{ rounding: 'floor' }` to reproduce its `Math.floor(unitSize * value)`
+  truncation exactly. This is verified by a differential test
+  (`test/differential-bytes.test.ts`) against the real, installed package
+  over a sweep of unit × value combinations, below 2⁵³; above 2⁵³, `bytes`'
+  plain-float arithmetic silently loses precision and this package's exact
+  bigint arithmetic does not — the same test documents and asserts that
+  divergence rather than papering over it.
+- `bytes@3.1.2`'s parser only matches `kb`/`mb`/`gb`/`tb`/`pb` by regex, with
+  no bare `b`/`B` suffix, nothing past `pb`, and no exponent notation. Any
+  input that fails that regex — including a bare number, `KiB`, `1e3kb`, or
+  anything above `pb` — falls back in `bytes` to `parseInt(val, 10)` with
+  the unit forced to `'b'`, silently truncating at the first non-digit
+  character (this is the fallback that makes `bytes.parse('10KiB')` return
+  `10`). This package does not reproduce that fallback in `jedec` mode: a
+  bare number or `KiB` is still read as the size it actually names, not
+  truncated. "Matches `bytes`" is a claim about its five real units, not
+  about that fallback path.
+
 `auto` mode matches the `humanfriendly` row.
 
 ## How it works
 
 `parse()` converts the decimal literal to an exact `numerator/denominator`
-bigint fraction (no floating-point step), multiplies by the unit's `base^exponent`,
-and requires the result to reduce to a whole number of bits (and, for
-`parse()` specifically, a whole number of bytes) — otherwise it throws rather
-than silently rounding. `format()` runs the same arithmetic in reverse: it
+bigint fraction (no floating-point step) and multiplies by the unit's
+`base^exponent`. The result is checked for exactness in the unit's own
+currency — bits for a bit-denominated unit, bytes for a byte-denominated
+one — which is what makes the thrown error name the right family
+(`FractionalBitError` vs. `FractionalByteError`) instead of a fractional `EB`
+being reported as a bit problem just because bytes are internally 8 bits.
+`rounding: 'nearest' | 'floor'` rounds instead of throwing. `format()` runs
+the arithmetic in reverse: it
 picks the largest unit that the magnitude clears, scales the mantissa by
 `10^precision` using bigint division with an explicit half-up remainder
 check, and re-picks the unit if that rounding would have carried the mantissa
@@ -265,8 +301,11 @@ npm run build && npm run test:dist    # what CI runs against node 20/22/24
 
 The differential test against Python's `humanfriendly` needs it importable
 by some Python (`pip install humanfriendly`); point `IECBYTES_PYTHON` at that
-interpreter if it isn't `python3` on `PATH`. It is not a dependency of this
-package and the test skips loudly, with instructions, if it's absent.
+interpreter if it isn't `python3` on `PATH`. The differential test against
+the real `bytes` npm package needs it installed in some directory (`npm
+install bytes@3.1.2` in a scratch dir); point `IECBYTES_BYTES_CWD` at that
+directory. Neither is a dependency of this package, and both tests skip
+loudly, with instructions, if their target is absent.
 
 ## License
 
