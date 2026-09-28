@@ -1,0 +1,49 @@
+{
+  "name": "iecbytes",
+  "version": "0.1.0",
+  "description": "Byte-size parsing and formatting that gets SI (kB = 1000) and IEC (KiB = 1024) right, with exact bigint arithmetic.",
+  "keywords": [
+    "bytes",
+    "filesize",
+    "kib",
+    "kb",
+    "si",
+    "iec",
+    "jedec",
+    "parse",
+    "format",
+    "bigint"
+  ],
+  "license": "MIT",
+  "author": "__AUTHOR__",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/__GH_OWNER__/iecbytes.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run test:dist",
+    "test:dist": "node --test test/smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
